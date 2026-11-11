@@ -1,0 +1,6 @@
+{
+  "name": "Chessora 3D",
+  "description": "Premium Offline 3D Chess Game with intelligent AI, local multiplayer, rich progression, and daily puzzles.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
