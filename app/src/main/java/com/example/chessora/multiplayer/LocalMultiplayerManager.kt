@@ -104,7 +104,7 @@ class LocalMultiplayerManager(private val context: Context) {
     isHost = true
     localPlayerColor = preferredColor
     hostIpAddress = getLocalIpAddress()
-    hostPort = 8887 + Random.nextInt(100)
+    hostPort = 8887
     val randomCodeNum = Random.nextInt(1000, 9999)
     roomCode = "CHESS-$randomCodeNum"
 
@@ -114,7 +114,13 @@ class LocalMultiplayerManager(private val context: Context) {
 
     networkJob = scope.launch {
       try {
-        serverSocket = ServerSocket(hostPort)
+        serverSocket = try {
+          ServerSocket(8887)
+        } catch (_: Exception) {
+          val fallbackPort = 8887 + Random.nextInt(1, 100)
+          hostPort = fallbackPort
+          ServerSocket(fallbackPort)
+        }
         Log.d("Multiplayer", "Server listening on $hostIpAddress:$hostPort")
         val socket = serverSocket?.accept() ?: return@launch
         activeSocket = socket

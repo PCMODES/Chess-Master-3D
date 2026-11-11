@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -32,12 +33,20 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
+import android.graphics.Bitmap
+import androidx.compose.foundation.Image
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.asImageBitmap
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.EncodeHintType
+import com.google.zxing.qrcode.QRCodeWriter
+import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -610,69 +619,46 @@ fun QrCodeCanvas(
   payload: String,
   modifier: Modifier = Modifier
 ) {
-  // Generates visual QR matrix deterministically from string hash & payload bytes
-  val hashBytes = MessageDigest.getInstance("MD5").digest(payload.toByteArray())
-  val grid = 21 // Standard QR Version 1 grid size
+  val qrBitmap = remember(payload) {
+    try {
+      val cleanPayload = if (payload.isBlank()) "CHESSORA|127.0.0.1|8887|BLACK|ROOM" else payload
+      val hints = mapOf(
+        EncodeHintType.MARGIN to 1,
+        EncodeHintType.ERROR_CORRECTION to ErrorCorrectionLevel.M
+      )
+      val bitMatrix = QRCodeWriter().encode(cleanPayload, BarcodeFormat.QR_CODE, 512, 512, hints)
+      val w = bitMatrix.width
+      val h = bitMatrix.height
+      val pixels = IntArray(w * h)
+      for (y in 0 until h) {
+        val offset = y * w
+        for (x in 0 until w) {
+          pixels[offset + x] = if (bitMatrix.get(x, y)) android.graphics.Color.BLACK else android.graphics.Color.WHITE
+        }
+      }
+      val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+      bmp.setPixels(pixels, 0, w, 0, 0, w, h)
+      bmp.asImageBitmap()
+    } catch (_: Exception) {
+      null
+    }
+  }
 
   Box(
     modifier = modifier
       .aspectRatio(1f)
-      .clip(RoundedCornerShape(12.dp))
+      .clip(RoundedCornerShape(14.dp))
       .background(Color.White)
       .padding(14.dp)
-      .testTag("qr_code_display")
+      .testTag("qr_code_display"),
+    contentAlignment = Alignment.Center
   ) {
-    Canvas(modifier = Modifier.fillMaxWidth().aspectRatio(1f)) {
-      val cellSize = size.width / grid.toFloat()
-
-      fun isFinderPattern(r: Int, c: Int): Boolean {
-        // Top-Left 7x7
-        if (r in 0..6 && c in 0..6) return true
-        // Top-Right 7x7
-        if (r in 0..6 && c in (grid - 7) until grid) return true
-        // Bottom-Left 7x7
-        if (r in (grid - 7) until grid && c in 0..6) return true
-        return false
-      }
-
-      fun getFinderPatternColor(r: Int, c: Int, cornerR: Int, cornerC: Int): Boolean {
-        val relR = r - cornerR
-        val relC = c - cornerC
-        if (relR in 0..6 && relC in 0..6) {
-          if (relR == 0 || relR == 6 || relC == 0 || relC == 6) return true
-          if (relR in 2..4 && relC in 2..4) return true
-        }
-        return false
-      }
-
-      // Draw modules
-      for (r in 0 until grid) {
-        for (c in 0 until grid) {
-          val isBlack: Boolean
-          if (isFinderPattern(r, c)) {
-            isBlack = when {
-              r in 0..6 && c in 0..6 -> getFinderPatternColor(r, c, 0, 0)
-              r in 0..6 && c in (grid - 7) until grid -> getFinderPatternColor(r, c, 0, grid - 7)
-              r in (grid - 7) until grid && c in 0..6 -> getFinderPatternColor(r, c, grid - 7, 0)
-              else -> false
-            }
-          } else {
-            // Data modules generated from payload hash bits
-            val bitIndex = (r * grid + c) % (hashBytes.size * 8)
-            val byteVal = hashBytes[bitIndex / 8].toInt()
-            val bit = (byteVal ushr (bitIndex % 8)) and 1
-            isBlack = bit == 1 || (r + c) % 3 == 0
-          }
-
-          if (isBlack) {
-            drawRect(
-              color = Color.Black,
-              topLeft = Offset(c * cellSize, r * cellSize),
-              size = Size(cellSize, cellSize)
-            )
-          }
-        }
-      }
+    if (qrBitmap != null) {
+      Image(
+        bitmap = qrBitmap,
+        contentDescription = "Room QR Code",
+        modifier = Modifier.fillMaxSize()
+      )
     }
   }
 }

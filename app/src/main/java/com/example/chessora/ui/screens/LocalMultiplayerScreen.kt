@@ -32,13 +32,17 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
+import androidx.camera.core.ImageProxy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.example.chessora.sound.ChessSoundManager
+import com.google.zxing.BarcodeFormat
 import com.google.zxing.BinaryBitmap
+import com.google.zxing.DecodeHintType
 import com.google.zxing.MultiFormatReader
 import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.common.HybridBinarizer
@@ -533,10 +537,13 @@ fun LocalMultiplayerScreen(
           cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
         },
         onDismiss = { showQrScannerDialog = false },
-        onCodeScanned = { scannedIp ->
-          joinInput = scannedIp
+        onCodeScanned = { scannedTarget ->
+          joinInput = if (scannedTarget.startsWith("CHESSORA|")) {
+            val parts = scannedTarget.split("|")
+            if (parts.size >= 2) parts[1] else scannedTarget
+          } else scannedTarget
           showQrScannerDialog = false
-          onJoinRoom(scannedIp, "Challenger")
+          onJoinRoom(scannedTarget, "Challenger")
         }
       )
     }
@@ -632,6 +639,8 @@ fun QrScannerDialog(
   onDismiss: () -> Unit,
   onCodeScanned: (String) -> Unit
 ) {
+  val context = LocalContext.current
+  val soundManager = remember { ChessSoundManager(context) }
   val infiniteTransition = rememberInfiniteTransition(label = "scanner_laser")
   val laserProgress by infiniteTransition.animateFloat(
     initialValue = 0.05f,
@@ -715,7 +724,10 @@ fun QrScannerDialog(
           if (hasCameraPermission) {
             // Live Camera Preview
             CameraQrScannerView(
-              onCodeScanned = onCodeScanned,
+              onCodeScanned = { rawResult ->
+                soundManager.playScanSuccessSound()
+                onCodeScanned(rawResult)
+              },
               modifier = Modifier.fillMaxSize()
             )
 
@@ -789,6 +801,7 @@ fun QrScannerDialog(
           text = "AUTO-CONNECT HOTSPOT (192.168.43.1)",
           icon = Icons.Default.FlashOn,
           onClick = {
+            soundManager.playClickSound()
             onCodeScanned("192.168.43.1")
             onDismiss()
           },
@@ -836,7 +849,12 @@ fun CameraQrScannerView(
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .build()
 
-          val reader = MultiFormatReader()
+          val hints = mapOf(
+            DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE),
+            DecodeHintType.TRY_HARDER to java.lang.Boolean.TRUE,
+            DecodeHintType.CHARACTER_SET to "UTF-8"
+          )
+          val reader = MultiFormatReader().apply { setHints(hints) }
 
           imageAnalysis.setAnalyzer(ContextCompat.getMainExecutor(ctx)) { imageProxy ->
             if (hasScanned.value) {
@@ -845,27 +863,12 @@ fun CameraQrScannerView(
             }
 
             try {
-              val planes = imageProxy.planes
-              if (planes.isNotEmpty()) {
-                val buffer = planes[0].buffer
-                val data = ByteArray(buffer.remaining())
-                buffer.get(data)
-
-                val width = imageProxy.width
-                val height = imageProxy.height
-                val source = PlanarYUVLuminanceSource(
-                  data, width, height, 0, 0, width, height, false
-                )
-                val binaryBitmap = BinaryBitmap(HybridBinarizer(source))
-                val result = reader.decodeWithState(binaryBitmap)
-
-                if (result != null && !result.text.isNullOrBlank()) {
-                  val raw = result.text.trim()
-                  val ip = extractHostIp(raw)
-                  if (ip.isNotBlank()) {
-                    hasScanned.value = true
-                    onCodeScanned(ip)
-                  }
+              val rawText = decodeQrFromImageProxy(reader, imageProxy)
+              if (!rawText.isNullOrBlank()) {
+                val validTarget = extractHostIp(rawText)
+                if (validTarget.isNotBlank()) {
+                  hasScanned.value = true
+                  onCodeScanned(validTarget)
                 }
               }
             } catch (_: Exception) {
@@ -895,9 +898,121 @@ fun CameraQrScannerView(
   )
 }
 
+/**
+ * Extracts raw luminance data from ImageProxy handling rowStride padding,
+ * adjusts for physical camera sensor rotation, and decodes QR codes using ZXing.
+ */
+private fun decodeQrFromImageProxy(reader: MultiFormatReader, imageProxy: ImageProxy): String? {
+  val planes = imageProxy.planes
+  if (planes.isEmpty()) return null
+
+  val yPlane = planes[0]
+  val yBuffer = yPlane.buffer
+  val width = imageProxy.width
+  val height = imageProxy.height
+  val rowStride = yPlane.rowStride
+  val pixelStride = yPlane.pixelStride
+
+  // Extract raw luminance bytes, properly handling rowStride padding
+  val yData = ByteArray(width * height)
+  yBuffer.rewind()
+
+  if (rowStride == width && pixelStride == 1) {
+    val bytesToRead = minOf(width * height, yBuffer.remaining())
+    yBuffer.get(yData, 0, bytesToRead)
+  } else {
+    var outOffset = 0
+    val rowBuffer = ByteArray(rowStride)
+    for (row in 0 until height) {
+      yBuffer.position(row * rowStride)
+      if (pixelStride == 1) {
+        val bytesToRead = minOf(width, yBuffer.remaining())
+        yBuffer.get(yData, outOffset, bytesToRead)
+        outOffset += width
+      } else {
+        val bytesToRead = minOf(rowStride, yBuffer.remaining())
+        yBuffer.get(rowBuffer, 0, bytesToRead)
+        for (col in 0 until width) {
+          yData[outOffset++] = rowBuffer[col * pixelStride]
+        }
+      }
+    }
+  }
+
+  // Handle camera sensor rotation relative to UI orientation
+  val rotationDegrees = imageProxy.imageInfo.rotationDegrees
+  val (finalData, finalWidth, finalHeight) = when (rotationDegrees) {
+    90 -> {
+      val rotated = ByteArray(width * height)
+      for (y in 0 until height) {
+        for (x in 0 until width) {
+          rotated[x * height + (height - 1 - y)] = yData[y * width + x]
+        }
+      }
+      Triple(rotated, height, width)
+    }
+    180 -> {
+      val rotated = ByteArray(width * height)
+      for (i in 0 until width * height) {
+        rotated[width * height - 1 - i] = yData[i]
+      }
+      Triple(rotated, width, height)
+    }
+    270 -> {
+      val rotated = ByteArray(width * height)
+      for (y in 0 until height) {
+        for (x in 0 until width) {
+          rotated[(width - 1 - x) * height + y] = yData[y * width + x]
+        }
+      }
+      Triple(rotated, height, width)
+    }
+    else -> Triple(yData, width, height)
+  }
+
+  val source = PlanarYUVLuminanceSource(
+    finalData,
+    finalWidth,
+    finalHeight,
+    0,
+    0,
+    finalWidth,
+    finalHeight,
+    false
+  )
+
+  // 1. Try standard binarization
+  var text: String? = try {
+    val bitmap = BinaryBitmap(HybridBinarizer(source))
+    reader.decodeWithState(bitmap)?.text
+  } catch (_: Exception) {
+    null
+  }
+
+  // 2. Fallback to inverted luminance (handles dark mode, glare, or inverted screens)
+  if (text.isNullOrBlank()) {
+    text = try {
+      val invertedSource = source.invert()
+      val bitmap = BinaryBitmap(HybridBinarizer(invertedSource))
+      reader.decodeWithState(bitmap)?.text
+    } catch (_: Exception) {
+      null
+    }
+  }
+
+  return text?.trim()
+}
+
 fun extractHostIp(raw: String): String {
   val clean = raw.trim()
-  val ipRegex = Regex("""([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})""")
+  if (clean.startsWith("CHESSORA|")) {
+    return clean
+  }
+  val ipPortRegex = Regex("""^([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}(:[0-9]+)?)$""")
+  if (ipPortRegex.matches(clean)) {
+    return clean
+  }
+  val ipRegex = Regex("""([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}(:[0-9]+)?)""")
   val match = ipRegex.find(clean)
   return match?.value ?: clean
 }
